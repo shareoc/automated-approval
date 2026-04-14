@@ -163,7 +163,7 @@ const analyzeEvent = async (event) => {
       console.log(`Reasoning: ${reasoning}`);
       if (decision === 'YES') {
         integrationSdk.users.approve({ id: new UUID(userId) }).then(res => {
-          // res.data
+          console.log("User approved")
         });
       } else {
       }
