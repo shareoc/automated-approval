@@ -41,14 +41,12 @@ const integrationSdk = sharetribeIntegrationSdk.createInstance({
 const startTime = new Date();
 
 // Polling interval (in ms) when all events have been fetched. Keeping this at 1
-// minute or more is a good idea. In this example we use 10 seconds so that the
-// data is printed out without too much delay.
-const pollIdleWait = 10000;
+const pollIdleWait = 60000;
 // Polling interval (in ms) when a full page of events is received and there may be more
 const pollWait = 250;
 
 const queryEvents = (args) => {
-  var filter = {eventTypes: "listing/created,listing/updated"};
+  var filter = {eventTypes: "listing/created,listing/updated,user/created"};
   return integrationSdk.events.query(
     {...args, ...filter}
   );
@@ -103,8 +101,74 @@ Respond with a JSON object: { "decision": "YES", "reasoning": "..." } or { "deci
   return result;
 };
 
+const askAnthropicForUserApproval = async (user, userId) => {
+  const { email, emailVerified, createdAt, profile, identityProviders } = user.attributes;
+  const userInfo = JSON.stringify({ userId, email, emailVerified, createdAt, profile, identityProviders }, null, 2);
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: `You are a user moderation assistant for a marketplace for collectors of hellenic and ptolemaic coinage. Review the new user account and decide if it should be approved.
+
+Reject if any of the following are true:
+- The profile name appears to be fake, gibberish, or a bot pattern
+- The email domain looks suspicious
+- The bio or public data contains offensive content
+- The account shows strong signs of being fraudulent or spam
+
+Approve if the account appears to be a genuine person. Note that the user email will always be unverified on account creation.
+
+Respond with a JSON object: { "decision": "YES", "reasoning": "..." } or { "decision": "NO", "reasoning": "..." }`,
+    messages: [
+      {
+        role: 'user',
+        content: `Please review this user account and decide if it should be approved:\n\n${userInfo}`,
+      },
+    ],
+    output_config: {
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            decision: {
+              type: 'string',
+              enum: ['YES', 'NO'],
+            },
+            reasoning: {
+              type: 'string',
+            },
+          },
+          required: ['decision', 'reasoning'],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+
+  const result = JSON.parse(message.content[0].text);
+  return result;
+};
+
 const analyzeEvent = async (event) => {
-  if (event.attributes.resourceType == "listing") {
+  if (event.attributes.resourceType == "user") {
+    const { resourceId, resource: user, eventType } = event.attributes;
+    const userId = resourceId.uuid;
+    const userDetails = `user ID ${userId}, email: ${user.attributes.email}`;
+
+    if (eventType === "user/created") {
+      console.log(`A new user has registered: ${userDetails}`);
+      const { decision, reasoning } = await askAnthropicForUserApproval(user, userId);
+      console.log(`Anthropic approval decision: ${decision}`);
+      console.log(`Reasoning: ${reasoning}`);
+      if (decision === 'YES') {
+        integrationSdk.users.approve({ id: new UUID(userId) }).then(res => {
+          // res.data
+        });
+      } else {
+      }
+    }
+  } else if (event.attributes.resourceType == "listing") {
     const {
       resourceId,
       resource: listing,
