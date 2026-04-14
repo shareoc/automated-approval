@@ -1,11 +1,5 @@
-// This example uses events to detect when new listings are pending approval or
-// are published and prints out information about those listings. The sequence
-// ID of the last processed event is stored locally so that the event processing
-// can continue from the correct point on next execution.
-
 // This dotenv import is required for the `.env` file to be read
 require('dotenv').config();
-const fs = require('fs');
 
 const Anthropic = require('@anthropic-ai/sdk');
 const sharetribeIntegrationSdk = require('sharetribe-flex-integration-sdk');
@@ -44,7 +38,6 @@ const integrationSdk = sharetribeIntegrationSdk.createInstance({
   baseUrl: process.env.SHARETRIBE_INTEGRATION_BASE_URL || 'https://flex-integ-api.sharetribe.com',
 });
 
-// Start polling from current time on, when there's no stored state
 const startTime = new Date();
 
 // Polling interval (in ms) when all events have been fetched. Keeping this at 1
@@ -54,32 +47,11 @@ const pollIdleWait = 10000;
 // Polling interval (in ms) when a full page of events is received and there may be more
 const pollWait = 250;
 
-// File to keep state across restarts. Stores the last seen event sequence ID,
-// which allows continuing polling from the correct place
-const stateFile = "./notify-new-listings.state";
-
 const queryEvents = (args) => {
   var filter = {eventTypes: "listing/created,listing/updated"};
   return integrationSdk.events.query(
     {...args, ...filter}
   );
-};
-
-const saveLastEventSequenceId = (sequenceId) => {
-  try {
-    fs.writeFileSync(stateFile, sequenceId.toString());
-  } catch (err) {
-    throw err;
-  }
-};
-
-const loadLastEventSequenceId = () => {
-  try {
-    const data = fs.readFileSync(stateFile);
-    return parseInt(data, 10);
-  } catch (err) {
-    return null;
-  }
 };
 
 const askAnthropicForApproval = async (listing, listingId, authorId) => {
@@ -198,25 +170,16 @@ const pollLoop = (sequenceId) => {
       const events = res.data.data;
       const lastEvent = events[events.length - 1];
       const fullPage = events.length === res.data.meta.perPage;
-      const delay = fullPage? pollWait : pollIdleWait;
+      const delay = fullPage ? pollWait : pollIdleWait;
       const lastSequenceId = lastEvent ? lastEvent.attributes.sequenceId : sequenceId;
 
       await Promise.all(events.map(e => analyzeEvent(e)));
-
-      if (lastEvent) saveLastEventSequenceId(lastEvent.attributes.sequenceId);
 
       setTimeout(() => {pollLoop(lastSequenceId);}, delay);
     });
 };
 
-const lastSequenceId = loadLastEventSequenceId();
-
 console.log("Press <CTRL>+C to quit.");
-if (lastSequenceId) {
-  console.log(`Resuming event polling from last seen event with sequence ID ${lastSequenceId}`);
-} else {
-  console.log("No state found or failed to load state.");
-  console.log("Starting event polling from current time.");
-}
+console.log("Starting event polling from current time.");
 
-pollLoop(lastSequenceId);
+pollLoop(null);
