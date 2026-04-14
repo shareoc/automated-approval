@@ -102,8 +102,9 @@ Respond with a JSON object: { "decision": "YES", "reasoning": "..." } or { "deci
 };
 
 const askAnthropicForUserApproval = async (user, userId) => {
-  const { email, emailVerified, createdAt, profile, identityProviders } = user.attributes;
-  const userInfo = JSON.stringify({ userId, email, emailVerified, createdAt, profile, identityProviders }, null, 2);
+  const { email, createdAt, profile} = user.attributes;
+  console.log(user)
+  const userInfo = JSON.stringify({ userId, email, createdAt, profile }, null, 2);
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
@@ -116,7 +117,7 @@ Reject if any of the following are true:
 - The bio or public data contains offensive content
 - The account shows strong signs of being fraudulent or spam
 
-Approve if the account appears to be a genuine person. Note that the user email will always be unverified on account creation.
+Approve if the account appears to be a genuine person. 
 
 Respond with a JSON object: { "decision": "YES", "reasoning": "..." } or { "decision": "NO", "reasoning": "..." }`,
     messages: [
