@@ -1,0 +1,11 @@
+{
+  "name": "automated-ai-user-approval",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "dotenv": "^16.0.3",
+    "sharetribe-flex-integration-sdk": "1.9.0"
+  }
+}

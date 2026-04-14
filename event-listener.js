@@ -1,0 +1,222 @@
+// This example uses events to detect when new listings are pending approval or
+// are published and prints out information about those listings. The sequence
+// ID of the last processed event is stored locally so that the event processing
+// can continue from the correct point on next execution.
+
+// This dotenv import is required for the `.env` file to be read
+require('dotenv').config();
+const fs = require('fs');
+
+const Anthropic = require('@anthropic-ai/sdk');
+const sharetribeIntegrationSdk = require('sharetribe-flex-integration-sdk');
+const { UUID } = sharetribeIntegrationSdk.types;
+
+// Create rate limit handler for queries.
+// NB! If you are using the script in production environment,
+// you will need to use sharetribeIntegrationSdk.util.prodQueryLimiterConfig
+const queryLimiter = sharetribeIntegrationSdk.util.createRateLimiter(
+  sharetribeIntegrationSdk.util.devQueryLimiterConfig
+);
+
+// Create rate limit handler for commands.
+// NB! If you are using the script in production environment,
+// you will need to use sharetribeIntegrationSdk.util.prodCommandLimiterConfig
+const commandLimiter = sharetribeIntegrationSdk.util.createRateLimiter(
+  sharetribeIntegrationSdk.util.devCommandLimiterConfig
+);
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+const integrationSdk = sharetribeIntegrationSdk.createInstance({
+  // These two env vars need to be set in the `.env` file.
+  clientId: process.env.SHARETRIBE_INTEGRATION_CLIENT_ID,
+  clientSecret: process.env.SHARETRIBE_INTEGRATION_CLIENT_SECRET,
+
+  // Pass rate limit handlers
+  queryLimiter: queryLimiter,
+  commandLimiter: commandLimiter,
+
+  // Normally you can just skip setting the base URL and just use the
+  // default that the `createInstance` uses. We explicitly set it here
+  // for local testing and development.
+  baseUrl: process.env.SHARETRIBE_INTEGRATION_BASE_URL || 'https://flex-integ-api.sharetribe.com',
+});
+
+// Start polling from current time on, when there's no stored state
+const startTime = new Date();
+
+// Polling interval (in ms) when all events have been fetched. Keeping this at 1
+// minute or more is a good idea. In this example we use 10 seconds so that the
+// data is printed out without too much delay.
+const pollIdleWait = 10000;
+// Polling interval (in ms) when a full page of events is received and there may be more
+const pollWait = 250;
+
+// File to keep state across restarts. Stores the last seen event sequence ID,
+// which allows continuing polling from the correct place
+const stateFile = "./notify-new-listings.state";
+
+const queryEvents = (args) => {
+  var filter = {eventTypes: "listing/created,listing/updated"};
+  return integrationSdk.events.query(
+    {...args, ...filter}
+  );
+};
+
+const saveLastEventSequenceId = (sequenceId) => {
+  try {
+    fs.writeFileSync(stateFile, sequenceId.toString());
+  } catch (err) {
+    throw err;
+  }
+};
+
+const loadLastEventSequenceId = () => {
+  try {
+    const data = fs.readFileSync(stateFile);
+    return parseInt(data, 10);
+  } catch (err) {
+    return null;
+  }
+};
+
+const askAnthropicForApproval = async (listing, listingId, authorId) => {
+  const { title, description, price, state, publicData } = listing.attributes;
+  const listingInfo = JSON.stringify({ listingId, authorId, title, description, price, state, publicData }, null, 2);
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: `You are a listing moderation assistant for a marketplace for collectors items: hellenic and ptolemaic coinage. Review the listing and decide if it should be approved.
+
+Reject if any of the following are true:
+- Title or description is missing, gibberish, or placeholder text
+- The listing is for something that is not related to the marketplace (e.g. consumables, illegal items)
+- Content is offensive, discriminatory, or violates basic community standards
+- The listing appears to be a scam or duplicate spam listing
+
+Approve if the listing has a clear title and a coherent description.
+
+Respond with a JSON object: { "decision": "YES", "reasoning": "..." } or { "decision": "NO", "reasoning": "..." }`,
+    messages: [
+      {
+        role: 'user',
+        content: `Please review this listing and decide if it should be approved:\n\n${listingInfo}`,
+      },
+    ],
+    output_config: {
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            decision: {
+              type: 'string',
+              enum: ['YES', 'NO'],
+            },
+            reasoning: {
+              type: 'string',
+            },
+          },
+          required: ['decision', 'reasoning'],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+
+  const result = JSON.parse(message.content[0].text);
+  return result;
+};
+
+const analyzeEvent = async (event) => {
+  if (event.attributes.resourceType == "listing") {
+    const {
+      resourceId,
+      resource: listing,
+      previousValues,
+      eventType,
+    } = event.attributes;
+    const listingId = resourceId.uuid;
+    const authorId = listing.relationships.author.data.id.uuid;
+    const listingState = listing.attributes.state;
+    const listingDetails = `listing ID ${listingId}, author ID: ${authorId}`;
+    const {state: previousState} = previousValues.attributes || {};
+
+    const isPublished = listingState === "published";
+    const isPendingApproval = listingState === "pendingApproval";
+    const wasDraft = previousState === "draft";
+    const wasPendingApproval = previousState === "pendingApproval";
+
+    switch(eventType) {
+    case "listing/created":
+      if (isPendingApproval) {
+        console.log(`A new listing is pending approval: ${listingDetails}`);
+        const { decision: approvalDecisionCreated, reasoning: reasoningCreated } = await askAnthropicForApproval(listing, listingId, authorId);
+        console.log(`Anthropic approval decision: ${approvalDecisionCreated}`);
+        console.log(`Reasoning: ${reasoningCreated}`);
+        if (approvalDecisionCreated === 'YES') {
+          console.log("APPROVED")
+          integrationSdk.listings.approve({ id: new UUID(listingId) }, { expand: true }).then(res => {
+            // res.data
+          });
+        } else {
+          console.log("NOT APPROVED")
+        }
+      } else if (isPublished) {
+        console.log(`A new listing has been published: ${listingDetails}`);
+      }
+      break;
+    case "listing/updated":
+      if (isPublished && wasPendingApproval) {
+        console.log(`A listing has been approved by operator: ${listingDetails}`);
+      } else if (isPublished && wasDraft) {
+        console.log(`A new listing has been published: ${listingDetails}`);
+      } else if (isPendingApproval && wasDraft) {
+        console.log(`A new listing is pending approval: ${listingDetails}`);
+        const { decision: approvalDecisionUpdated, reasoning: reasoningUpdated } = await askAnthropicForApproval(listing, listingId, authorId);
+        console.log(`Anthropic approval decision: ${approvalDecisionUpdated}`);
+        console.log(`Reasoning: ${reasoningUpdated}`);
+        if (approvalDecisionUpdated === 'YES') {
+          integrationSdk.listings.approve({ id: new UUID(listingId) }, { expand: true }).then(res => {
+            // res.data
+          });
+        } else {
+        }
+      }
+      break;
+    }
+  }
+};
+
+const pollLoop = (sequenceId) => {
+  var params = sequenceId ? {startAfterSequenceId: sequenceId} : {createdAtStart: startTime};
+  queryEvents(params)
+    .then(async res => {
+      const events = res.data.data;
+      const lastEvent = events[events.length - 1];
+      const fullPage = events.length === res.data.meta.perPage;
+      const delay = fullPage? pollWait : pollIdleWait;
+      const lastSequenceId = lastEvent ? lastEvent.attributes.sequenceId : sequenceId;
+
+      await Promise.all(events.map(e => analyzeEvent(e)));
+
+      if (lastEvent) saveLastEventSequenceId(lastEvent.attributes.sequenceId);
+
+      setTimeout(() => {pollLoop(lastSequenceId);}, delay);
+    });
+};
+
+const lastSequenceId = loadLastEventSequenceId();
+
+console.log("Press <CTRL>+C to quit.");
+if (lastSequenceId) {
+  console.log(`Resuming event polling from last seen event with sequence ID ${lastSequenceId}`);
+} else {
+  console.log("No state found or failed to load state.");
+  console.log("Starting event polling from current time.");
+}
+
+pollLoop(lastSequenceId);
